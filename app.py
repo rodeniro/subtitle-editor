@@ -1,12 +1,12 @@
 import streamlit as st
+import time
 from google import genai
 from google.genai import types
 
-# --- 1. 페이지 기본 설정 (반드시 최상단에 위치) ---
+# --- 1. 페이지 기본 설정 ---
 st.set_page_config(page_title="AI 자막 교정기", page_icon="📝", layout="wide")
 
-# --- 2. API 클라이언트 초기화 (캐싱 적용) ---
-# Streamlit Cloud 환경에서 매번 재연결하지 않도록 캐싱(@st.cache_resource)을 적용합니다.
+# --- 2. API 클라이언트 초기화 ---
 @st.cache_resource
 def get_genai_client():
     try:
@@ -19,8 +19,8 @@ def get_genai_client():
 client = get_genai_client()
 
 # --- 3. 모델 및 프롬프트 설정 ---
-# 최신 3.6 플래시 모델 적용
-MODEL_ID = 'gemini-3.6-flash'
+# 안정화된 3.5 플래시 모델로 변경
+MODEL_ID = 'gemini-3.5-flash'
 
 SYSTEM_INSTRUCTION = """
 당신은 최고 수준의 전문 자막 교정자입니다. 업로드된 파일의 텍스트를 분석하여 오탈자, 띄어쓰기, 문맥 오류를 철저히 검수해 주세요.
@@ -36,29 +36,25 @@ SYSTEM_INSTRUCTION = """
 """
 
 # --- 4. 웹앱 UI 구성 ---
-st.title("📝 AI 전문 자막 교정기 (v3.6)")
+st.title("📝 AI 전문 자막 교정기 (v3.5)")
 st.markdown("""
-**최신 Gemini 3.6 Flash 모델**을 탑재한 자막 검수 솔루션입니다.
-SMI, SRT 자막 파일을 업로드하면 AI가 오탈자와 문맥 오류를 검수하여 교정표를 제공합니다.
+안정적인 **Gemini 3.5 Flash** 모델을 탑재하고, 
+서버 과부하 시 자동으로 재시도하는 기능을 갖춘 자막 검수 솔루션입니다.
 """)
 
-# 사이드바 (설정 및 안내)
 with st.sidebar:
     st.header("⚙️ 검수 설정")
-    # 온도(Temperature) 조절 슬라이더 추가
     temperature = st.slider(
         "AI 창의성 (Temperature)", 
-        min_value=0.0, max_value=1.0, value=0.2, step=0.1, 
-        help="0에 가까울수록 일관되고 보수적인 검수를, 1에 가까울수록 유연한 교정을 제안합니다. 자막 검수는 0.2를 권장합니다."
+        min_value=0.0, max_value=1.0, value=0.2, step=0.1
     )
     st.divider()
-    st.info("💡 **Tip:** 파일 용량에 따라 검수 완료까지 약 10초 ~ 30초 정도 소요될 수 있습니다.")
+    st.info("💡 **Tip:** 서버 과부하(503 에러) 발생 시 자동으로 3초 대기 후 최대 3회까지 재시도합니다.")
 
 # --- 5. 파일 업로드 및 처리 ---
 uploaded_file = st.file_uploader("자막 파일을 업로드하세요 (지원 형식: .smi, .srt, .txt)", type=["smi", "srt", "txt"])
 
 if uploaded_file is not None:
-    # 윈도우/맥 등 다양한 환경에서 작성된 자막 파일 인코딩(한글 깨짐) 완벽 대응
     file_content = None
     encodings = ["utf-8", "euc-kr", "cp949"]
     
@@ -76,38 +72,51 @@ if uploaded_file is not None:
         
     st.success(f"✅ '{uploaded_file.name}' 파일이 준비되었습니다.")
     
-    # 원본 내용 미리보기 (너무 길면 자름)
     with st.expander("원본 자막 내용 미리보기"):
         st.text(file_content[:1000] + ("\n\n...(이하 생략)" if len(file_content) > 1000 else ""))
 
-    # --- 6. 교정 실행 및 결과 출력 ---
-    # 버튼을 넓게 배치하여 클릭 유도
+    # --- 6. 교정 실행 및 자동 재시도 로직 ---
     if st.button("🚀 AI 자막 검수 시작", type="primary", use_container_width=True):
-        with st.spinner("AI가 자막을 꼼꼼히 분석하고 있습니다. 잠시만 기다려주세요..."):
-            try:
-                # API 호출
-                response = client.models.generate_content(
-                    model=MODEL_ID,
-                    contents=f"--- 자막 내용 ---\n{file_content}",
-                    config=types.GenerateContentConfig(
-                        system_instruction=SYSTEM_INSTRUCTION,
-                        temperature=temperature
-                    )
-                )
-                
-                # 결과 출력
-                st.divider()
-                st.subheader("📊 검수 및 교정 결과")
-                st.markdown(response.text)
-                
-                # 엑셀/백데이터 활용을 위한 다운로드 버튼 제공
-                st.download_button(
-                    label="📥 검수 결과 다운로드 (.md)",
-                    data=response.text,
-                    file_name=f"검수결과_{uploaded_file.name}.md",
-                    mime="text/markdown",
-                    use_container_width=True
-                )
-                
-            except Exception as e:
-                st.error(f"❌ API 호출 중 오류가 발생했습니다: {e}")
+        max_retries = 3
+        status_container = st.empty() # 재시도 메시지 출력을 위한 빈 공간
+        
+        with status_container.container():
+            with st.spinner("AI가 자막을 꼼꼼히 분석하고 있습니다. 잠시만 기다려주세요..."):
+                for attempt in range(max_retries):
+                    try:
+                        # API 호출
+                        response = client.models.generate_content(
+                            model=MODEL_ID,
+                            contents=f"--- 자막 내용 ---\n{file_content}",
+                            config=types.GenerateContentConfig(
+                                system_instruction=SYSTEM_INSTRUCTION,
+                                temperature=temperature
+                            )
+                        )
+                        
+                        # 성공 시 기존 대기 메시지 삭제 및 결과 출력
+                        status_container.empty() 
+                        
+                        st.divider()
+                        st.subheader("📊 검수 및 교정 결과")
+                        st.markdown(response.text)
+                        
+                        st.download_button(
+                            label="📥 검수 결과 다운로드 (.md)",
+                            data=response.text,
+                            file_name=f"검수결과_{uploaded_file.name}.md",
+                            mime="text/markdown",
+                            use_container_width=True
+                        )
+                        break # 성공하면 반복문 즉시 탈출
+                        
+                    except Exception as e:
+                        # 503 에러 발생 시 재시도 로직
+                        if "503" in str(e) and attempt < max_retries - 1:
+                            st.warning(f"⚠️ 서버 과부하 감지. 3초 후 다시 시도합니다... (재시도 {attempt+1}/{max_retries})")
+                            time.sleep(3)
+                        else:
+                            # 503 이외의 에러거나 최대 재시도 횟수를 초과한 경우
+                            status_container.empty()
+                            st.error(f"❌ API 호출 중 오류가 발생했습니다: {e}")
+                            break
