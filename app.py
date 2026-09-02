@@ -19,7 +19,7 @@ def get_genai_client():
 client = get_genai_client()
 
 # --- 3. 모델 및 프롬프트 설정 ---
-# 안정화된 3.5 플래시 모델로 변경
+# 안정화된 3.5 플래시 모델 사용
 MODEL_ID = 'gemini-3.5-flash'
 
 SYSTEM_INSTRUCTION = """
@@ -36,20 +36,27 @@ SYSTEM_INSTRUCTION = """
 """
 
 # --- 4. 웹앱 UI 구성 ---
-st.title("📝 AI 전문 자막 교정기 (v3.5)")
+st.title("📝 AI 전문 자막 교정기")
 st.markdown("""
 안정적인 **Gemini 3.5 Flash** 모델을 탑재하고, 
-서버 과부하 시 자동으로 재시도하는 기능을 갖춘 자막 검수 솔루션입니다.
+자막 텍스트의 오탈자 및 문맥 오류를 정밀하게 분석해 주는 검수 솔루션입니다.
 """)
 
+# 슬라이더 대신 사용자 친화적인 가이드라인 추가
 with st.sidebar:
-    st.header("⚙️ 검수 설정")
-    temperature = st.slider(
-        "AI 창의성 (Temperature)", 
-        min_value=0.0, max_value=1.0, value=0.2, step=0.1
-    )
+    st.header("📌 이용 가이드")
+    st.markdown("""
+    **1. 파일 업로드**
+    지원되는 형식(.smi, .srt, .txt)의 자막 파일을 화면에 끌어다 놓으세요.
+    
+    **2. 검수 시작**
+    'AI 자막 검수 시작' 버튼을 누릅니다. 자막 분량에 따라 약 10초 ~ 30초 정도 소요될 수 있습니다.
+    
+    **3. 결과 확인 및 활용**
+    검수가 끝나면 타임코드와 함께 오탈자, 수정 제안이 표 형태로 출력됩니다. 결과표 하단의 '다운로드' 버튼을 눌러 문서로 저장해 보세요.
+    """)
     st.divider()
-    st.info("💡 **Tip:** 서버 과부하(503 에러) 발생 시 자동으로 3초 대기 후 최대 3회까지 재시도합니다.")
+    st.info("💡 **시스템 안내:** 일시적인 서버 과부하 발생 시 자동으로 최대 3회까지 재시도하도록 설계되어 있습니다.")
 
 # --- 5. 파일 업로드 및 처리 ---
 uploaded_file = st.file_uploader("자막 파일을 업로드하세요 (지원 형식: .smi, .srt, .txt)", type=["smi", "srt", "txt"])
@@ -78,23 +85,22 @@ if uploaded_file is not None:
     # --- 6. 교정 실행 및 자동 재시도 로직 ---
     if st.button("🚀 AI 자막 검수 시작", type="primary", use_container_width=True):
         max_retries = 3
-        status_container = st.empty() # 재시도 메시지 출력을 위한 빈 공간
+        status_container = st.empty() 
         
         with status_container.container():
             with st.spinner("AI가 자막을 꼼꼼히 분석하고 있습니다. 잠시만 기다려주세요..."):
                 for attempt in range(max_retries):
                     try:
-                        # API 호출
+                        # API 호출 (Temperature 0.2 하드코딩)
                         response = client.models.generate_content(
                             model=MODEL_ID,
                             contents=f"--- 자막 내용 ---\n{file_content}",
                             config=types.GenerateContentConfig(
                                 system_instruction=SYSTEM_INSTRUCTION,
-                                temperature=temperature
+                                temperature=0.2 # 검수 품질을 위해 0.2로 고정
                             )
                         )
                         
-                        # 성공 시 기존 대기 메시지 삭제 및 결과 출력
                         status_container.empty() 
                         
                         st.divider()
@@ -108,15 +114,13 @@ if uploaded_file is not None:
                             mime="text/markdown",
                             use_container_width=True
                         )
-                        break # 성공하면 반복문 즉시 탈출
+                        break
                         
                     except Exception as e:
-                        # 503 에러 발생 시 재시도 로직
                         if "503" in str(e) and attempt < max_retries - 1:
-                            st.warning(f"⚠️ 서버 과부하 감지. 3초 후 다시 시도합니다... (재시도 {attempt+1}/{max_retries})")
+                            st.warning(f"⚠️ 서버 접속량이 많습니다. 3초 후 다시 시도합니다... (재시도 {attempt+1}/{max_retries})")
                             time.sleep(3)
                         else:
-                            # 503 이외의 에러거나 최대 재시도 횟수를 초과한 경우
                             status_container.empty()
                             st.error(f"❌ API 호출 중 오류가 발생했습니다: {e}")
                             break
