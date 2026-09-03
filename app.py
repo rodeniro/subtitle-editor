@@ -51,7 +51,7 @@ with st.sidebar:
     지원되는 형식(.smi, .srt, .txt)의 자막 파일을 화면에 끌어다 놓으세요.
     
     **2. 검수 시작**
-    'AI 자막 검수 시작' 버튼을 누릅니다. 자막 분량에 따라 약 10초 ~ 30초 정도 소요될 수 있습니다.
+    'AI 자막 검수 시작' 버튼을 누릅니다. 결과는 실시간(스트리밍)으로 화면에 출력됩니다.
     
     **3. 결과 확인 및 활용**
     검수가 끝나면 타임코드와 함께 오탈자, 수정 제안이 표 형태로 출력됩니다. 결과표 하단의 '다운로드' 버튼을 눌러 문서로 저장해 보세요.
@@ -83,17 +83,17 @@ if uploaded_file is not None:
     with st.expander("원본 자막 내용 미리보기"):
         st.text(file_content[:1000] + ("\n\n...(이하 생략)" if len(file_content) > 1000 else ""))
 
-    # --- 6. 교정 실행 및 자동 재시도 로직 ---
+    # --- 6. 교정 실행 및 자동 재시도 로직 (스트리밍 적용) ---
     if st.button("🚀 AI 자막 검수 시작", type="primary", use_container_width=True):
         max_retries = 3
         status_container = st.empty() 
         
         with status_container.container():
-            with st.spinner("AI가 자막을 꼼꼼히 분석하고 있습니다. 잠시만 기다려주세요..."):
+            with st.spinner("AI가 자막 분석을 시작합니다..."):
                 for attempt in range(max_retries):
                     try:
-                        # API 호출 (Temperature 0.2 고정)
-                        response = client.models.generate_content(
+                        # 스트리밍 API 호출 (일관성 유지를 위해 temperature 0.2 고정)
+                        response_stream = client.models.generate_content_stream(
                             model=MODEL_ID,
                             contents=f"--- 자막 내용 ---\n{file_content}",
                             config=types.GenerateContentConfig(
@@ -103,14 +103,22 @@ if uploaded_file is not None:
                         )
                         
                         status_container.empty() 
-                        
                         st.divider()
                         st.subheader("📊 검수 및 교정 결과")
-                        st.markdown(response.text)
                         
+                        # 스트림 제너레이터 함수
+                        def stream_generator():
+                            for chunk in response_stream:
+                                if chunk.text:
+                                    yield chunk.text
+                        
+                        # st.write_stream을 통해 실시간 출력 후, 전체 텍스트를 full_text에 저장
+                        full_text = st.write_stream(stream_generator)
+                        
+                        # 전체 텍스트가 완성되면 다운로드 버튼 생성
                         st.download_button(
                             label="📥 검수 결과 다운로드 (.md)",
-                            data=response.text,
+                            data=full_text,
                             file_name=f"검수결과_{uploaded_file.name}.md",
                             mime="text/markdown",
                             use_container_width=True
