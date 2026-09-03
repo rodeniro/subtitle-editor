@@ -6,31 +6,8 @@ from google.genai import types
 # --- 1. 페이지 기본 설정 ---
 st.set_page_config(page_title="AI 자막 교정기", page_icon="📝", layout="wide")
 
-# --- 2. 비밀번호 확인 로직 ---
-def check_password():
-    """비밀번호가 일치하면 True를 반환하고 앱을 실행합니다."""
-    if "password_correct" not in st.session_state:
-        st.session_state["password_correct"] = False
-
-    if not st.session_state["password_correct"]:
-        st.title("🔒 자막 검수 시스템 로그인")
-        pwd = st.text_input("웹앱 접근 암호를 입력하세요", type="password")
-        
-        # 사용할 비밀번호를 아래 "ktalpha123!" 대신 입력하세요.
-        if pwd == "ktalpha123!": 
-            st.session_state["password_correct"] = True
-            st.rerun()
-        elif pwd:
-            st.error("❌ 암호가 일치하지 않습니다.")
-        return False
-    return True
-
-# 암호를 풀지 못하면 여기서 앱 실행을 멈춤
-if not check_password():
-    st.stop()
-
 # ==========================================
-# --- 3. API 클라이언트 초기화 ---
+# --- 2. API 클라이언트 초기화 ---
 # ==========================================
 @st.cache_resource
 def get_genai_client():
@@ -43,7 +20,7 @@ def get_genai_client():
 
 client = get_genai_client()
 
-# --- 4. 모델 및 프롬프트 설정 ---
+# --- 3. 모델 및 프롬프트 설정 ---
 # 안정화된 2.5 플래시 모델 사용 (할당량 및 안정성 고려)
 MODEL_ID = 'gemini-2.5-flash'
 
@@ -60,7 +37,7 @@ SYSTEM_INSTRUCTION = """
 5. 마침표(.) 사용 금지 (매우 중요): 문장 끝에는 절대 마침표(.)를 찍지 말고, 원본에 마침표가 없다고 해서 이를 오류로 잡지도 마세요. (단, 문맥에 따라 물음표(?)나 느낌표(!)는 허용됩니다.)
 """
 
-# --- 5. 웹앱 UI 구성 ---
+# --- 4. 웹앱 UI 구성 ---
 st.title("📝 AI 전문 자막 교정기")
 st.markdown("""
 안정적인 **Gemini 2.5 Flash** 모델을 탑재하고, 
@@ -81,13 +58,8 @@ with st.sidebar:
     """)
     st.divider()
     st.info("💡 **시스템 안내:** 일시적인 서버 과부하 발생 시 자동으로 최대 3회까지 재시도하도록 설계되어 있습니다.")
-    
-    # 로그아웃 버튼 (세션 초기화)
-    if st.button("🔒 로그아웃"):
-        st.session_state["password_correct"] = False
-        st.rerun()
 
-# --- 6. 파일 업로드 및 처리 ---
+# --- 5. 파일 업로드 및 처리 ---
 uploaded_file = st.file_uploader("자막 파일을 업로드하세요 (지원 형식: .smi, .srt, .txt)", type=["smi", "srt", "txt"])
 
 if uploaded_file is not None:
@@ -111,7 +83,7 @@ if uploaded_file is not None:
     with st.expander("원본 자막 내용 미리보기"):
         st.text(file_content[:1000] + ("\n\n...(이하 생략)" if len(file_content) > 1000 else ""))
 
-    # --- 7. 교정 실행 및 자동 재시도 로직 ---
+    # --- 6. 교정 실행 및 자동 재시도 로직 ---
     if st.button("🚀 AI 자막 검수 시작", type="primary", use_container_width=True):
         max_retries = 3
         status_container = st.empty() 
@@ -120,7 +92,7 @@ if uploaded_file is not None:
             with st.spinner("AI가 자막을 꼼꼼히 분석하고 있습니다. 잠시만 기다려주세요..."):
                 for attempt in range(max_retries):
                     try:
-                        # API 호출 (Temperature 0.2 하드코딩)
+                        # API 호출 (Temperature 0.2 고정)
                         response = client.models.generate_content(
                             model=MODEL_ID,
                             contents=f"--- 자막 내용 ---\n{file_content}",
