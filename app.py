@@ -82,50 +82,55 @@ if uploaded_file is not None:
     with st.expander("원본 자막 내용 미리보기"):
         st.text(file_content[:1000] + ("\n\n...(이하 생략)" if len(file_content) > 1000 else ""))
 
-    # --- 6. 교정 실행 및 자동 재시도 로직 (스트리밍 적용 - UI 오류 수정됨) ---
+  # --- 6. 교정 실행 및 자동 재시도 로직 (스트리밍 적용 및 UI 중복 수정) ---
     if st.button("🚀 AI 자막 검수 시작", type="primary", use_container_width=True):
         max_retries = 3
         
+        # 재시도 시 UI가 중복해서 그려지는 것을 막기 위한 빈 컨테이너
+        ui_container = st.empty()
+        
         for attempt in range(max_retries):
             try:
-                # API 연결 중일 때만 스피너 표시
-                with st.spinner("서버에 연결 중입니다... (연결 후 실시간으로 결과가 출력됩니다)"):
-                    response_stream = client.models.generate_content_stream(
-                        model=MODEL_ID,
-                        contents=f"--- 자막 내용 ---\n{file_content}",
-                        config=types.GenerateContentConfig(
-                            system_instruction=SYSTEM_INSTRUCTION,
-                            temperature=0.2
+                # ui_container 안에 화면을 그립니다.
+                with ui_container.container():
+                    with st.spinner(f"서버에 연결 중입니다... (시도 {attempt+1}/{max_retries})"):
+                        response_stream = client.models.generate_content_stream(
+                            model=MODEL_ID,
+                            contents=f"--- 자막 내용 ---\n{file_content}",
+                            config=types.GenerateContentConfig(
+                                system_instruction=SYSTEM_INSTRUCTION,
+                                temperature=0.2
+                            )
                         )
+                    
+                    st.divider()
+                    st.subheader("📊 검수 및 교정 결과")
+                    
+                    def stream_generator():
+                        for chunk in response_stream:
+                            if chunk.text:
+                                yield chunk.text
+                    
+                    full_text = st.write_stream(stream_generator)
+                    
+                    st.download_button(
+                        label="📥 검수 결과 다운로드 (.md)",
+                        data=full_text,
+                        file_name=f"검수결과_{uploaded_file.name}.md",
+                        mime="text/markdown",
+                        use_container_width=True
                     )
-                
-                # 결과 출력 영역 (스피너와 완전히 분리)
-                st.divider()
-                st.subheader("📊 검수 및 교정 결과")
-                
-                # 스트림 제너레이터 함수
-                def stream_generator():
-                    for chunk in response_stream:
-                        if chunk.text:
-                            yield chunk.text
-                
-                # 화면에 실시간 출력
-                full_text = st.write_stream(stream_generator)
-                
-                # 다운로드 버튼 생성
-                st.download_button(
-                    label="📥 검수 결과 다운로드 (.md)",
-                    data=full_text,
-                    file_name=f"검수결과_{uploaded_file.name}.md",
-                    mime="text/markdown",
-                    use_container_width=True
-                )
+                # 성공하면 반복문 탈출
                 break
                 
             except Exception as e:
+                # 에러가 발생하면 ui_container 내부(중복된 제목 등)를 싹 지웁니다.
+                ui_container.empty() 
+                
                 if "503" in str(e) and attempt < max_retries - 1:
-                    st.warning(f"⚠️ 서버 접속량이 많습니다. 3초 후 다시 시도합니다... (재시도 {attempt+1}/{max_retries})")
-                    time.sleep(3)
+                    # 구글 서버 회복을 위해 대기 시간을 5초로 늘림
+                    st.warning(f"⚠️ 구글 서버 접속량이 많습니다. 5초 후 다시 시도합니다... (재시도 {attempt+1}/{max_retries})")
+                    time.sleep(5) 
                 elif "429" in str(e):
                     st.error("❌ API 일일 무료 제공량을 모두 소진했습니다. 내일 다시 시도하거나 새 API 키를 등록해주세요.")
                     break
