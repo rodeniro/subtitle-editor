@@ -1,7 +1,6 @@
 import streamlit as st
 import time
-from google import genai
-from google.genai import types
+from openai import OpenAI
 
 # --- 1. 페이지 기본 설정 ---
 st.set_page_config(page_title="AI 자막 교정기", page_icon="📝", layout="wide")
@@ -10,18 +9,20 @@ st.set_page_config(page_title="AI 자막 교정기", page_icon="📝", layout="w
 # --- 2. API 클라이언트 초기화 ---
 # ==========================================
 @st.cache_resource
-def get_genai_client():
+def get_openai_client():
     try:
-        api_key = st.secrets["GEMINI_API_KEY"]
-        return genai.Client(api_key=api_key)
+        # Streamlit Secrets에서 OpenAI API 키를 가져옵니다.
+        api_key = st.secrets["OPENAI_API_KEY"]
+        return OpenAI(api_key=api_key)
     except KeyError:
-        st.error("⚠️ Streamlit Secrets에 'GEMINI_API_KEY'가 설정되지 않았습니다.")
+        st.error("⚠️ Streamlit Secrets에 'OPENAI_API_KEY'가 설정되지 않았습니다.")
         st.stop()
 
-client = get_genai_client()
+client = get_openai_client()
 
 # --- 3. 모델 및 프롬프트 설정 ---
-MODEL_ID = 'gemini-2.5-flash'
+# 가성비와 처리 속도가 매우 뛰어난 최신 경량 모델
+MODEL_ID = 'gpt-4o-mini'
 
 SYSTEM_INSTRUCTION = """
 당신은 최고 수준의 전문 자막 교정자입니다. 업로드된 파일의 텍스트를 분석하여 오탈자, 띄어쓰기, 문맥 오류를 철저히 검수해 주세요.
@@ -37,10 +38,10 @@ SYSTEM_INSTRUCTION = """
 """
 
 # --- 4. 웹앱 UI 구성 ---
-st.title("📝 AI 전문 자막 교정기")
+st.title("📝 AI 전문 자막 교정기 (OpenAI)")
 st.markdown("""
-안정적인 **Gemini 2.5 Flash** 모델을 탑재하고, 
-자막 텍스트의 오탈자 및 문맥 오류를 정밀하게 분석해 주는 검수 솔루션입니다.
+빠르고 안정적인 **OpenAI GPT-4o-mini** 모델을 탑재하여, 
+자막 텍스트의 오탈자 및 문맥 오류를 지연 없이 정밀하게 분석해 주는 검수 솔루션입니다.
 """)
 
 with st.sidebar:
@@ -55,8 +56,6 @@ with st.sidebar:
     **3. 결과 확인 및 활용**
     검수가 끝나면 타임코드와 함께 오탈자, 수정 제안이 표 형태로 출력됩니다. 결과표 하단의 '다운로드' 버튼을 눌러 문서로 저장해 보세요.
     """)
-    st.divider()
-    st.info("💡 **시스템 안내:** 일시적인 서버 과부하 발생 시 자동으로 최대 3회까지 재시도하도록 설계되어 있습니다.")
 
 # --- 5. 파일 업로드 및 처리 ---
 uploaded_file = st.file_uploader("자막 파일을 업로드하세요 (지원 형식: .smi, .srt, .txt)", type=["smi", "srt", "txt"])
@@ -82,58 +81,47 @@ if uploaded_file is not None:
     with st.expander("원본 자막 내용 미리보기"):
         st.text(file_content[:1000] + ("\n\n...(이하 생략)" if len(file_content) > 1000 else ""))
 
-  # --- 6. 교정 실행 및 자동 재시도 로직 (스트리밍 적용 및 UI 중복 수정) ---
+    # --- 6. 교정 실행 로직 (스트리밍 적용) ---
     if st.button("🚀 AI 자막 검수 시작", type="primary", use_container_width=True):
-        max_retries = 3
-        
-        # 재시도 시 UI가 중복해서 그려지는 것을 막기 위한 빈 컨테이너
         ui_container = st.empty()
         
-        for attempt in range(max_retries):
-            try:
-                # ui_container 안에 화면을 그립니다.
-                with ui_container.container():
-                    with st.spinner(f"서버에 연결 중입니다... (시도 {attempt+1}/{max_retries})"):
-                        response_stream = client.models.generate_content_stream(
-                            model=MODEL_ID,
-                            contents=f"--- 자막 내용 ---\n{file_content}",
-                            config=types.GenerateContentConfig(
-                                system_instruction=SYSTEM_INSTRUCTION,
-                                temperature=0.2
-                            )
-                        )
-                    
-                    st.divider()
-                    st.subheader("📊 검수 및 교정 결과")
-                    
-                    def stream_generator():
-                        for chunk in response_stream:
-                            if chunk.text:
-                                yield chunk.text
-                    
-                    full_text = st.write_stream(stream_generator)
-                    
-                    st.download_button(
-                        label="📥 검수 결과 다운로드 (.md)",
-                        data=full_text,
-                        file_name=f"검수결과_{uploaded_file.name}.md",
-                        mime="text/markdown",
-                        use_container_width=True
+        try:
+            with ui_container.container():
+                with st.spinner("OpenAI 서버에 연결 중입니다... (연결 후 실시간으로 결과가 출력됩니다)"):
+                    # OpenAI 스트리밍 API 호출 (온도 0.2 고정)
+                    response_stream = client.chat.completions.create(
+                        model=MODEL_ID,
+                        messages=[
+                            {"role": "system", "content": SYSTEM_INSTRUCTION},
+                            {"role": "user", "content": f"--- 자막 내용 ---\n{file_content}"}
+                        ],
+                        temperature=0.2,
+                        stream=True
                     )
-                # 성공하면 반복문 탈출
-                break
                 
-            except Exception as e:
-                # 에러가 발생하면 ui_container 내부(중복된 제목 등)를 싹 지웁니다.
-                ui_container.empty() 
+                st.divider()
+                st.subheader("📊 검수 및 교정 결과")
                 
-                if "503" in str(e) and attempt < max_retries - 1:
-                    # 구글 서버 회복을 위해 대기 시간을 5초로 늘림
-                    st.warning(f"⚠️ 구글 서버 접속량이 많습니다. 5초 후 다시 시도합니다... (재시도 {attempt+1}/{max_retries})")
-                    time.sleep(5) 
-                elif "429" in str(e):
-                    st.error("❌ API 일일 무료 제공량을 모두 소진했습니다. 내일 다시 시도하거나 새 API 키를 등록해주세요.")
-                    break
-                else:
-                    st.error(f"❌ API 호출 중 오류가 발생했습니다: {e}")
-                    break
+                # OpenAI 응답 청크를 스트리밍하는 제너레이터
+                def stream_generator():
+                    for chunk in response_stream:
+                        # chunk.choices[0].delta.content에 실시간 생성 텍스트가 담깁니다.
+                        content = chunk.choices[0].delta.content
+                        if content is not None:
+                            yield content
+                
+                # 화면에 실시간 출력
+                full_text = st.write_stream(stream_generator)
+                
+                # 다운로드 버튼 생성
+                st.download_button(
+                    label="📥 검수 결과 다운로드 (.md)",
+                    data=full_text,
+                    file_name=f"검수결과_{uploaded_file.name}.md",
+                    mime="text/markdown",
+                    use_container_width=True
+                )
+                
+        except Exception as e:
+            ui_container.empty()
+            st.error(f"❌ API 호출 중 오류가 발생했습니다: {e}")
