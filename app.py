@@ -1,5 +1,7 @@
 import streamlit as st
 import time
+import pandas as pd
+import io
 from openai import OpenAI
 
 # --- 1. 페이지 기본 설정 ---
@@ -36,10 +38,6 @@ SYSTEM_INSTRUCTION = """
 """
 
 def split_text_safely(text, target_lines=400):
-    """
-    SMI의 <SYNC> 태그나 SRT의 빈 줄 등 자막의 흐름이 끊기지 않는 
-    안전한 구간에서 파일을 자동으로 분할합니다.
-    """
     lines = text.split('\n')
     chunks = []
     current_chunk = []
@@ -47,7 +45,6 @@ def split_text_safely(text, target_lines=400):
     for line in lines:
         if len(current_chunk) >= target_lines:
             strip_line = line.strip().upper()
-            # 타임코드 시작점이나 빈 줄에서만 안전하게 자르기
             if strip_line == "" or strip_line.startswith("<SYNC") or strip_line.isdigit():
                 chunks.append('\n'.join(current_chunk))
                 current_chunk = []
@@ -58,6 +55,34 @@ def split_text_safely(text, target_lines=400):
         chunks.append('\n'.join(current_chunk))
         
     return chunks
+
+def convert_markdown_to_excel(md_text):
+    """마크다운 텍스트에서 표 데이터만 추출하여 엑셀 파일(바이트 객체)로 변환합니다."""
+    lines = md_text.strip().split('\n')
+    data = []
+    
+    for line in lines:
+        line = line.strip()
+        # 마크다운 표의 행(Row)에 해당하는 줄만 추출
+        if line.startswith('|') and line.endswith('|'):
+            row = [cell.strip() for cell in line.split('|')[1:-1]]
+            # 구분선(|---|---|) 제외
+            if all(all(c in ['-', ':', ' '] for c in cell) for cell in row):
+                continue
+            data.append(row)
+            
+    if len(data) > 1:
+        # 첫 번째 행을 컬럼명으로 지정
+        df = pd.DataFrame(data[1:], columns=data[0])
+    else:
+        # 표 데이터가 없을 경우 빈 데이터프레임 생성
+        df = pd.DataFrame()
+        
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='검수결과')
+    
+    return output.getvalue()
 
 # --- 4. 웹앱 UI 구성 ---
 st.title("📝 AI 전문 자막 교정기 (OpenAI 대용량 버전)")
@@ -76,7 +101,7 @@ with st.sidebar:
     파일 길이가 길어도 시스템이 타임코드를 기준으로 안전하게 분할하여 연속으로 검수를 진행합니다.
     
     **3. 결과 확인 및 활용**
-    단일 표 형태로 완성된 결과를 다운로드하여 데이터로 활용하세요.
+    단일 표 형태로 완성된 결과를 엑셀(.xlsx)로 다운로드하여 데이터로 활용하세요.
     """)
 
 # --- 5. 파일 업로드 및 처리 ---
@@ -112,15 +137,12 @@ if uploaded_file is not None:
                 st.divider()
                 st.subheader("📊 전체 검수 및 교정 결과")
                 
-                # 타임코드 단절 없이 파일 분할
                 chunks = split_text_safely(file_content, target_lines=400)
                 
                 def stream_all_chunks():
                     for i, chunk in enumerate(chunks):
-                        # 우측 하단에 진행 상태 알림창(토스트) 띄우기
                         st.toast(f"🔄 자막 검수 진행 중... (파트 {i+1} / {len(chunks)})")
                         
-                        # 표가 하나로 이어지도록 프롬프트 분기 처리
                         if i == 0:
                             prompt = f"--- 자막 내용 (파트 {i+1}/{len(chunks)}) ---\n{chunk}\n\n[중요] 처음부터 빠짐없이 검수를 시작해 주세요. 반드시 마크다운 표 형식(첫 줄 표 헤더 포함)으로 출력하세요."
                         else:
@@ -144,18 +166,20 @@ if uploaded_file is not None:
                                 
                         yield "\n"
                 
-                # 화면에 실시간으로 연속 출력
                 with st.spinner("AI가 자막을 분석하고 있습니다... (대용량 파일은 백그라운드에서 순차적으로 이어집니다)"):
                     full_text = st.write_stream(stream_all_chunks)
                 
                 st.toast("✅ 전체 검수가 완료되었습니다!", icon="🎉")
                 
-                # 전체 출력이 끝나면 단일 파일로 다운로드 버튼 생성
+                # 마크다운 텍스트를 엑셀 파일로 변환
+                excel_data = convert_markdown_to_excel(full_text)
+                
+                # 엑셀 다운로드 버튼 생성
                 st.download_button(
-                    label="📥 전체 검수 백데이터 다운로드 (.md)",
-                    data=full_text,
-                    file_name=f"검수결과_{uploaded_file.name}.md",
-                    mime="text/markdown",
+                    label="📥 전체 검수 백데이터 다운로드 (.xlsx)",
+                    data=excel_data,
+                    file_name=f"검수결과_{uploaded_file.name}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True
                 )
                 
