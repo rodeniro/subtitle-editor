@@ -28,20 +28,35 @@ SYSTEM_INSTRUCTION = """
 아래의 [검수 및 중요 자막 정책]을 엄격히 준수하여 작업을 수행해야 합니다.
 
 [검수 및 중요 자막 정책]
-1. 결과물 출력 형식: 결과는 추후 차트 작성 및 데이터 수정을 위한 백데이터로 활용할 수 있도록, 반드시 [타임코드(시:분:초) | 원본 | 수정 제안 | 사유] 순서의 마크다운 표 형식으로만 작성해 주세요. 불필요한 서론이나 맺음말은 생략합니다.
+1. 결과물 출력 형식: 반드시 [타임코드(시:분:초) | 원본 | 수정 제안 | 사유] 순서의 마크다운 표 형식으로만 작성해 주세요. 불필요한 서론이나 맺음말은 생략합니다.
 2. 타임코드 표기 (시:분:초): SMI/SRT 파일의 타임코드(밀리초 등)를 그대로 노출하지 말고, 반드시 "시:분:초" (예: 01:12:30 또는 00:05:15) 형식으로 변환하여 표의 타임코드 열에 기재해 주세요.
 3. <br> 태그 예외 처리: 자막 내에 포함된 `<br>` 코드는 줄바꿈을 의미하는 정상적인 코드입니다. 이를 오류로 잡거나 임의로 삭제하지 말고 그대로 유지한 상태에서 텍스트만 교정하세요.
 4. 표현의 보존: 구어체나 사투리는 상황 및 영상의 문맥에 맞게 최대한 보존하며, 명백한 맞춤법 및 문맥 오류만 교정해 주세요.
 5. 마침표(.) 사용 금지 (매우 중요): 문장 끝에는 절대 마침표(.)를 찍지 말고, 원본에 마침표가 없다고 해서 이를 오류로 잡지도 마세요. (단, 문맥에 따라 물음표(?)나 느낌표(!)는 허용됩니다.)
 """
 
-def split_text_into_chunks(text, lines_per_chunk=400):
-    """긴 자막 파일을 여러 개의 덩어리(Chunk)로 안전하게 나눕니다."""
+def split_text_safely(text, target_lines=400):
+    """
+    SMI의 <SYNC> 태그나 SRT의 빈 줄 등 자막의 흐름이 끊기지 않는 
+    안전한 구간에서 파일을 자동으로 분할합니다.
+    """
     lines = text.split('\n')
     chunks = []
-    for i in range(0, len(lines), lines_per_chunk):
-        chunk = '\n'.join(lines[i:i + lines_per_chunk])
-        chunks.append(chunk)
+    current_chunk = []
+    
+    for line in lines:
+        if len(current_chunk) >= target_lines:
+            strip_line = line.strip().upper()
+            # 타임코드 시작점이나 빈 줄에서만 안전하게 자르기
+            if strip_line == "" or strip_line.startswith("<SYNC") or strip_line.isdigit():
+                chunks.append('\n'.join(current_chunk))
+                current_chunk = []
+        
+        current_chunk.append(line)
+        
+    if current_chunk:
+        chunks.append('\n'.join(current_chunk))
+        
     return chunks
 
 # --- 4. 웹앱 UI 구성 ---
@@ -58,10 +73,10 @@ with st.sidebar:
     지원되는 형식(.smi, .srt, .txt)의 자막 파일을 화면에 끌어다 놓으세요.
     
     **2. 검수 시작**
-    파일 길이가 길어도 시스템이 자동으로 400줄씩 분할하여 연속으로 검수를 진행합니다.
+    파일 길이가 길어도 시스템이 타임코드를 기준으로 안전하게 분할하여 연속으로 검수를 진행합니다.
     
     **3. 결과 확인 및 활용**
-    모든 파트의 검수가 완료되면 하단의 '다운로드' 버튼을 눌러 전체 문서를 저장하세요.
+    단일 표 형태로 완성된 결과를 다운로드하여 데이터로 활용하세요.
     """)
 
 # --- 5. 파일 업로드 및 처리 ---
@@ -88,7 +103,7 @@ if uploaded_file is not None:
     with st.expander("원본 자막 내용 미리보기"):
         st.text(file_content[:1000] + ("\n\n...(이하 생략)" if len(file_content) > 1000 else ""))
 
-    # --- 6. 대용량 교정 실행 로직 (자동 분할 및 연속 스트리밍) ---
+    # --- 6. 대용량 교정 실행 로직 (안전 분할 및 단일 표 스트리밍) ---
     if st.button("🚀 AI 자막 검수 시작", type="primary", use_container_width=True):
         ui_container = st.empty()
         
@@ -97,19 +112,25 @@ if uploaded_file is not None:
                 st.divider()
                 st.subheader("📊 전체 검수 및 교정 결과")
                 
-                # 파일을 400줄(약 10~15분) 단위로 쪼갬
-                chunks = split_text_into_chunks(file_content, lines_per_chunk=400)
+                # 타임코드 단절 없이 파일 분할
+                chunks = split_text_safely(file_content, target_lines=400)
                 
-                # 여러 개의 분할된 요청을 하나의 스트림으로 매끄럽게 이어붙이는 함수
                 def stream_all_chunks():
                     for i, chunk in enumerate(chunks):
-                        yield f"\n\n### 🔄 파트 {i+1} / {len(chunks)} 진행 중...\n\n"
+                        # 우측 하단에 진행 상태 알림창(토스트) 띄우기
+                        st.toast(f"🔄 자막 검수 진행 중... (파트 {i+1} / {len(chunks)})")
                         
+                        # 표가 하나로 이어지도록 프롬프트 분기 처리
+                        if i == 0:
+                            prompt = f"--- 자막 내용 (파트 {i+1}/{len(chunks)}) ---\n{chunk}\n\n[중요] 처음부터 빠짐없이 검수를 시작해 주세요. 반드시 마크다운 표 형식(첫 줄 표 헤더 포함)으로 출력하세요."
+                        else:
+                            prompt = f"--- 자막 내용 (파트 {i+1}/{len(chunks)}) ---\n{chunk}\n\n[중요] 이전 파트에서 바로 이어지는 자막입니다. **표의 헤더(|타임코드|원본|...|)를 절대 작성하지 말고**, 이전 표에 이어지도록 데이터 행(|01:12:30|...|)부터 연속해서 바로 기재하세요. 타임코드는 원본 흐름을 끊지 말고 이어서 작성해야 합니다."
+                            
                         response_stream = client.chat.completions.create(
                             model=MODEL_ID,
                             messages=[
                                 {"role": "system", "content": SYSTEM_INSTRUCTION},
-                                {"role": "user", "content": f"--- 자막 내용 ---\n{chunk}\n\n[중요] 자막 내용의 시작부터 마지막 줄까지 절대 생략하거나 멈추지 말고, 누락 없이 모든 오류를 검수 표로 작성해 주세요."}
+                                {"role": "user", "content": prompt}
                             ],
                             temperature=0.2,
                             max_tokens=16000,
@@ -120,16 +141,18 @@ if uploaded_file is not None:
                             content = chunk_resp.choices[0].delta.content
                             if content is not None:
                                 yield content
-                        
-                        yield "\n\n---\n"
+                                
+                        yield "\n"
                 
                 # 화면에 실시간으로 연속 출력
-                with st.spinner("AI가 자막을 분석하고 있습니다... (대용량 파일은 순차적으로 처리됩니다)"):
+                with st.spinner("AI가 자막을 분석하고 있습니다... (대용량 파일은 백그라운드에서 순차적으로 이어집니다)"):
                     full_text = st.write_stream(stream_all_chunks)
+                
+                st.toast("✅ 전체 검수가 완료되었습니다!", icon="🎉")
                 
                 # 전체 출력이 끝나면 단일 파일로 다운로드 버튼 생성
                 st.download_button(
-                    label="📥 전체 검수 결과 다운로드 (.md)",
+                    label="📥 전체 검수 백데이터 다운로드 (.md)",
                     data=full_text,
                     file_name=f"검수결과_{uploaded_file.name}.md",
                     mime="text/markdown",
