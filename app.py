@@ -3,7 +3,9 @@ import streamlit as st
 
 # --- 1. 페이지 기본 설정 ---
 st.set_page_config(
-    page_title="AI 자막 교정기 (시간순 정렬 버전)", page_icon="📝", layout="wide"
+    page_title="AI 자막 교정기 (완벽 타임코드 보존 버전)",
+    page_icon="📝",
+    layout="wide",
 )
 
 # ==========================================
@@ -33,7 +35,7 @@ SYSTEM_INSTRUCTION = """
 
 [검수 및 중요 자막 정책]
 1. 결과물 출력 형식: 반드시 [타임코드(시:분:초) | 원본 | 수정 제안 | 사유] 순서의 마크다운 표 형식으로만 작성해 주세요. 불필요한 서론이나 맺음말은 절대 작성하지 마세요.
-2. 타임코드 순서 유지 (매우 중요): 입력된 자막의 시간 순서(과거 -> 미래)를 완벽하게 유지하여 위에서부터 아래로 순차적으로 출력해야 합니다. 절대 타임코드가 뒤죽박죽이 되거나 거꾸로 출력되면 안 됩니다.
+2. 타임코드 순서 및 정확성 유지 ( 매우 중요): 입력된 자막의 시간 순서(과거 -> 미래)를 완벽하게 유지하여 위에서부터 아래로 순차적으로 출력해야 합니다. 절대 타임코드가 뒤죽박죽이 되거나 '0:00:00' 같은 임의의 값으로 초기화되면 안 됩니다. 원본의 타임코드를 정확히 시:분:초로 환산하세요.
 3. 타임코드 표기 (시:분:초): SMI/SRT 파일의 타임코드(밀리초 등)를 그대로 노출하지 말고, 반드시 "시:분:초" (예: 01:12:30 또는 00:05:15) 형식으로 변환하여 표의 타임코드 열에 기재해 주세요.
 4. <br> 태그 예외 처리: 자막 내에 포함된 `<br>` 코드는 줄바꿈을 의미하는 정상적인 코드입니다. 이를 오류로 잡거나 임의로 삭제하지 말고 그대로 유지한 상태에서 텍스트만 교정하세요.
 5. 표현의 보존: 구어체나 사투리는 상황 및 영상의 문맥에 맞게 최대한 보존하며, 명백한 맞춤법 및 문맥 오류만 교정해 주세요.
@@ -42,35 +44,32 @@ SYSTEM_INSTRUCTION = """
 """
 
 
-def split_text_safely(text, target_lines=200):
-  """자막 파일을 시간 순서가 깨지지 않도록 안전하게 분할합니다."""
-  lines = text.split("\n")
+def split_subtitles_by_blocks(text, block_size=80):
+  """자막 파일의 구조가 깨지지 않도록 블록 단위로 안전하게 분할합니다."""
+  text_upper = text.upper()
+  if "<SYNC" in text_upper:
+    parts = text.split("<SYNC")
+    blocks = []
+    if parts[0].strip():
+      blocks.append(parts[0])
+    for p in parts[1:]:
+      blocks.append("<SYNC" + p)
+  else:
+    parts = text.split("\n\n")
+    blocks = [p for p in parts if p.strip()]
+
   chunks = []
-  current_chunk = []
-
-  for line in lines:
-    current_chunk.append(line)
-    # 일정 줄 수 이상이면서 빈 줄이거나 싱크 태그인 안전한 지점에서 분할
-    if len(current_chunk) >= target_lines:
-      strip_line = line.strip().upper()
-      if (
-          strip_line == ""
-          or strip_line.startswith("<SYNC")
-          or strip_line.isdigit()
-      ):
-        chunks.append("\n".join(current_chunk))
-        current_chunk = []
-
-  if current_chunk:
-    chunks.append("\n".join(current_chunk))
+  for i in range(0, len(blocks), block_size):
+    chunk_blocks = blocks[i : i + block_size]
+    chunks.append("\n".join(chunk_blocks))
 
   return chunks
 
 
 # --- 4. 웹앱 UI 구성 ---
-st.title("📝 AI 전문 자막 교정기 (시간순 정렬 버전)")
+st.title("📝 AI 전문 자막 교정기 (완벽 타임코드 보존 버전)")
 st.markdown("""
-시간 순서가 뒤섞이지 않고 **오래된 순(시작 시간순)**으로 정확하게 정렬되어 교정 결과가 출력되는 솔루션입니다.
+시간 순서가 뒤섞이거나 타임코드가 리셋되는 현상 없이 **과거에서 미래로 정확히 이어지도록** 검수하는 솔루션입니다.
 """)
 
 with st.sidebar:
@@ -80,7 +79,7 @@ with st.sidebar:
     지원되는 형식(.smi, .srt, .txt)의 자막 파일을 업로드하세요.
     
     **2. 검수 시작**
-    시간 순서가 보존되도록 순차적으로 검수가 진행됩니다.
+    블록 단위로 안전하게 분할되어 시간순서가 꼬이지 않도록 연속 검수가 진행됩니다.
     """)
 
 # --- 5. 세션 상태 초기화 ---
@@ -120,7 +119,7 @@ if uploaded_file is not None:
   # --- 7. 대용량 교정 실행 로직 ---
   if st.button("🚀 AI 자막 검수 시작", type="primary", use_container_width=True):
     st.session_state.accumulated_result = ""
-    chunks = split_text_safely(file_content, target_lines=200)
+    chunks = split_subtitles_by_blocks(file_content, block_size=80)
 
     st.divider()
     st.subheader("📊 전체 검수 및 교정 결과")
@@ -138,8 +137,9 @@ if uploaded_file is not None:
 {chunk}
 
 [중요 지침]
-1. 위 자막의 타임코드 순서(과거에서 미래로 흐르는 시간순)를 철저히 지켜서 출력하세요.
-2. 반드시 마크다운 표 형식(첫 줄 표 헤더 포함)으로 출력하세요.
+1. 위 자막의 타임코드를 정확히 분석하여 과거에서 미래로 흐르는 시간 순서대로 표를 만드세요.
+2. 절대 타임코드를 임의로 변조하거나 '0:00:00'으로 초기화하지 마세요.
+3. 반드시 마크다운 표 형식(첫 줄 표 헤더 포함)으로 출력하세요.
 """
         else:
           prompt = f"""--- 자막 내용 (파트 {i+1}/{len(chunks)}) ---
@@ -148,7 +148,7 @@ if uploaded_file is not None:
 [중요 지침]
 1. 이 자막은 이전 파트의 시간대 바로 뒤에 이어지는 시간 순서의 자막입니다. 
 2. **표의 헤더(|타임코드|원본|...|)는 절대 다시 작성하지 말고**, 이전 표에 이어지도록 데이터 행부터 연속해서 바로 기재하세요.
-3. 시간 순서가 절대 역전되지 않도록 타임코드를 올바르게 정렬하여 출력하세요.
+3. 타임코드가 절대 역전되거나 '0:00:00'으로 튀지 않도록 올바른 시간 흐름을 유지하세요.
 """
 
         response_stream = client.chat.completions.create(
@@ -157,7 +157,7 @@ if uploaded_file is not None:
                 {"role": "system", "content": SYSTEM_INSTRUCTION},
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.0,  # 시간순 정렬 및 오탈자 교정의 정확도를 위해 온도를 0으로 고정
+            temperature=0.0,
             max_tokens=16000,
             stream=True,
         )
