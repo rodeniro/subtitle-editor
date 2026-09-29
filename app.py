@@ -63,63 +63,75 @@ def parse_srt_time_to_hms(srt_time_str):
 
 
 def parse_subtitles_to_pairs(text):
-  """파일 형식을 타지 않고 타임코드와 대사를 안정적으로 추출합니다."""
+  """SMI 및 SRT 자막 파일을 안정적으로 파싱하여 [타임코드, 대사] 쌍을 추출합니다."""
   lines = text.split("\n")
   pairs = []
   current_time = "00:00:00"
   current_text_lines = []
+  in_body = True
 
   for line in lines:
     stripped = line.strip()
+    stripped_lower = stripped.lower()
 
-    # SMI 또는 SRT 타임코드 패턴 감지
-    smi_match = re.search(r"sync\s*=\s*(\d+)|start\s*=\s*(\d+)", stripped, re.IGNORECASE)
+    # HTML 구조상 헤더 영역 체크
+    if "<head>" in stripped_lower or "<style" in stripped_lower:
+      in_body = False
+      continue
+    if "</head>" in stripped_lower or "</style>" in stripped_lower:
+      in_body = True
+      continue
+    if "<body" in stripped_lower:
+      in_body = True
+      continue
+
+    # 헤더 내부의 설정값이면 건너뜀
+    if not in_body:
+      continue
+
+    # 타임코드 감지 (SMI: <SYNC Start=...> 또는 SRT: 00:00:00 --> 00:00:00)
+    smi_match = re.search(r"start\s*=\s*(\d+)", stripped, re.IGNORECASE)
     srt_match = re.search(
         r"(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})",
         stripped,
     )
 
-    # <SYNC Start=12345 형식 대응을 위한 정규식 보완
-    if not smi_match and "<sync" in stripped.lower():
-      smi_match = re.search(r"(\d+)", stripped)
-
     if smi_match or srt_match:
-      # 이전 누적 대사 저장
+      # 이전까지 누적된 대사 저장
       if current_text_lines:
         text_content = " ".join(current_text_lines).strip()
         raw_text = re.sub(r"<[^>]+>", "", text_content).strip()
 
-        # HTML 구조 태그나 스타일 선언부가 아닌 경우에만 추가
-        if (
-            raw_text
-            and raw_text.lower() != "&nbsp;"
-            and "{" not in text_content
-            and "}" not in text_content
-        ):
+        # 공백이나 &nbsp;가 아닌 실제 유효 대사만 추가
+        if raw_text and raw_text.lower() != "&nbsp;":
           pairs.append((current_time, text_content))
         current_text_lines = []
 
-      # 시간 추출
       if smi_match:
-        # 숫자가 포함된 그룹 찾기
-        groups = [g for g in smi_match.groups() if g]
-        if groups:
-          current_time = format_milliseconds_to_hms(int(groups[0]))
+        current_time = format_milliseconds_to_hms(int(smi_match.group(1)))
       elif srt_match:
         current_time = parse_srt_time_to_hms(srt_match.group(1))
     else:
-      if stripped:
+      # 스타일 선언부나 불필요한 메타 태그가 아닌 일반 텍스트 라인 수집
+      if stripped and not any(
+          meta in stripped_lower
+          for meta in [
+              "font-family",
+              "margin-left",
+              "margin-right",
+              "margin-bottom",
+              "margin-top",
+              ".kokrcc",
+              "samitype",
+          ]
+      ):
         current_text_lines.append(line)
 
-  # 마지막 블록 처리
+  # 마지막 남은 블록 처리
   if current_text_lines:
     text_content = " ".join(current_text_lines).strip()
     raw_text = re.sub(r"<[^>]+>", "", text_content).strip()
-    if (
-        raw_text
-        and raw_text.lower() != "&nbsp;"
-        and "{" not in text_content
-    ):
+    if raw_text and raw_text.lower() != "&nbsp;":
       pairs.append((current_time, text_content))
 
   return pairs
