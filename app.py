@@ -36,7 +36,7 @@ SYSTEM_INSTRUCTION = """
 업로드된 자막의 타임라인과 대사 텍스트를 분석하여 오탈자, 띄어쓰기, 문맥 오류를 검수합니다.
 
 [핵심 검수 원칙 (매우 중요)]
-1. 순수 대사만 검수: 실제 화면에 출력되는 대사만 대상으로 오탈자와 띄어쓰기를 교정하세요.
+1. 순수 대사만 검수: HTML 태그 설정값이나 코드 조각이 아닌 실제 화면에 출력되는 대사만 대상으로 오탈자와 띄어쓰기를 교정하세요.
 2. 타임코드 절대 변경/조합 금지: 각 행에 지정된 타임코드는 절대 수정하거나 다른 행의 타임코드와 바꾸지 말고 그대로 사용하세요.
 3. 1:1 매칭 고정: 입력된 [타임코드 | 원본대사] 세트의 순서와 개수를 완벽하게 유지하세요.
 4. 결과물 형식: 반드시 [타임코드 | 원본 | 수정 제안 | 사유] 형식의 마크다운 표 행(|...|...|...|...)으로만 출력하세요. 다른 텍스트나 헤더를 임의로 넣지 마세요.
@@ -63,7 +63,7 @@ def parse_srt_time_to_hms(srt_time_str):
 
 
 def parse_subtitles_to_pairs(text):
-  """SMI 및 SRT 자막을 안전하고 직관적으로 파싱하여 [타임코드, 대사] 쌍을 추출합니다."""
+  """파일 형식을 타지 않고 타임코드와 대사를 안정적으로 추출합니다."""
   lines = text.split("\n")
   pairs = []
   current_time = "00:00:00"
@@ -71,59 +71,55 @@ def parse_subtitles_to_pairs(text):
 
   for line in lines:
     stripped = line.strip()
-    stripped_lower = stripped.lower()
 
-    # SMI 타임코드 감지
-    smi_match = re.search(r"<SYNC\s+Start\s*=\s*(\d+)", line, re.IGNORECASE)
-    # SRT 타임코드 감지
+    # SMI 또는 SRT 타임코드 패턴 감지
+    smi_match = re.search(r"sync\s*=\s*(\d+)|start\s*=\s*(\d+)", stripped, re.IGNORECASE)
     srt_match = re.search(
         r"(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})",
-        line,
+        stripped,
     )
 
+    # <SYNC Start=12345 형식 대응을 위한 정규식 보완
+    if not smi_match and "<sync" in stripped.lower():
+      smi_match = re.search(r"(\d+)", stripped)
+
     if smi_match or srt_match:
-      # 이전까지 쌓인 대사가 있다면 처리
+      # 이전 누적 대사 저장
       if current_text_lines:
         text_content = " ".join(current_text_lines).strip()
-        # HTML 태그 제거 후 순수 텍스트 추출
         raw_text = re.sub(r"<[^>]+>", "", text_content).strip()
 
-        # 메타데이터 설정부나 빈 공백(&nbsp;)이 아닐 때만 유효 대사로 인정
+        # HTML 구조 태그나 스타일 선언부가 아닌 경우에만 추가
         if (
             raw_text
             and raw_text.lower() != "&nbsp;"
-            and not any(
-                meta in text_content.lower()
-                for meta in [
-                    "<head>",
-                    "</head>",
-                    "<title>",
-                    "</title>",
-                    "<samiparam>",
-                    "<style",
-                    "font-family",
-                    "margin-left",
-                    ".kokrcc",
-                ]
-            )
+            and "{" not in text_content
+            and "}" not in text_content
         ):
           pairs.append((current_time, text_content))
-
         current_text_lines = []
 
+      # 시간 추출
       if smi_match:
-        current_time = format_milliseconds_to_hms(int(smi_match.group(1)))
+        # 숫자가 포함된 그룹 찾기
+        groups = [g for g in smi_match.groups() if g]
+        if groups:
+          current_time = format_milliseconds_to_hms(int(groups[0]))
       elif srt_match:
         current_time = parse_srt_time_to_hms(srt_match.group(1))
     else:
       if stripped:
         current_text_lines.append(line)
 
-  # 마지막 남은 블록 처리
+  # 마지막 블록 처리
   if current_text_lines:
     text_content = " ".join(current_text_lines).strip()
     raw_text = re.sub(r"<[^>]+>", "", text_content).strip()
-    if raw_text and raw_text.lower() != "&nbsp;":
+    if (
+        raw_text
+        and raw_text.lower() != "&nbsp;"
+        and "{" not in text_content
+    ):
       pairs.append((current_time, text_content))
 
   return pairs
@@ -132,7 +128,7 @@ def parse_subtitles_to_pairs(text):
 # --- 4. 웹앱 UI 구성 ---
 st.title("📝 AI 전문 자막 교정기 (싱크 밀림 방지 정밀 버전)")
 st.markdown("""
-자막 파일의 **실제 대사만 정확하게 타겟팅**하여 누락 없이 교정합니다.
+자막 파일의 **타임라인과 대사를 안정적으로 추출**하여 정확하게 교정합니다.
 """)
 
 with st.sidebar:
