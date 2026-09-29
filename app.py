@@ -36,7 +36,7 @@ SYSTEM_INSTRUCTION = """
 업로드된 자막의 타임라인과 대사 텍스트를 분석하여 오탈자, 띄어쓰기, 문맥 오류를 검수합니다.
 
 [핵심 검수 원칙 (매우 중요)]
-1. 순수 대사만 검수: HTML 태그 설정, 메타데이터, CSS 코드가 아닌 실제 화면에 출력되는 대사만 대상으로 오탈자와 띄어쓰기를 교정하세요.
+1. 순수 대사만 검수: 실제 화면에 출력되는 대사만 대상으로 오탈자와 띄어쓰기를 교정하세요.
 2. 타임코드 절대 변경/조합 금지: 각 행에 지정된 타임코드는 절대 수정하거나 다른 행의 타임코드와 바꾸지 말고 그대로 사용하세요.
 3. 1:1 매칭 고정: 입력된 [타임코드 | 원본대사] 세트의 순서와 개수를 완벽하게 유지하세요.
 4. 결과물 형식: 반드시 [타임코드 | 원본 | 수정 제안 | 사유] 형식의 마크다운 표 행(|...|...|...|...)으로만 출력하세요. 다른 텍스트나 헤더를 임의로 넣지 마세요.
@@ -63,7 +63,7 @@ def parse_srt_time_to_hms(srt_time_str):
 
 
 def parse_subtitles_to_pairs(text):
-  """SMI 및 SRT 자막 파일을 안정적으로 파싱하여 [타임코드, 대사 텍스트] 쌍을 추출합니다."""
+  """SMI 및 SRT 자막을 안전하고 직관적으로 파싱하여 [타임코드, 대사] 쌍을 추출합니다."""
   lines = text.split("\n")
   pairs = []
   current_time = "00:00:00"
@@ -73,32 +73,8 @@ def parse_subtitles_to_pairs(text):
     stripped = line.strip()
     stripped_lower = stripped.lower()
 
-    # 스타일, 헤더, 타이틀 등 메타데이터 선언부 라인은 건너뜀
-    if any(
-        tag in stripped_lower
-        for tag in [
-            "<head>",
-            "</head>",
-            "<title>",
-            "</title>",
-            "<samiparam>",
-            "</samiparam>",
-            "<style",
-            "</style>",
-            "metrics {",
-            "spec {",
-            "font-family",
-            ".kokrcc",
-            "<!--",
-            "-->",
-        ]
-    ):
-      # 단, 닫는 태그나 주석 내에 대사가 섞여있을 수 있으므로 구조 체크
-      if not ("<p" in stripped_lower or "<sync" in stripped_lower):
-        continue
-
-    # SMI 타임코드 감지 (<SYNC Start=...>)
-    smi_match = re.search(r"Start\s*=\s*(\d+)", line, re.IGNORECASE)
+    # SMI 타임코드 감지
+    smi_match = re.search(r"<SYNC\s+Start\s*=\s*(\d+)", line, re.IGNORECASE)
     # SRT 타임코드 감지
     srt_match = re.search(
         r"(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})",
@@ -106,14 +82,33 @@ def parse_subtitles_to_pairs(text):
     )
 
     if smi_match or srt_match:
-      # 이전까지 누적된 대사가 있다면 페어로 저장
+      # 이전까지 쌓인 대사가 있다면 처리
       if current_text_lines:
         text_content = " ".join(current_text_lines).strip()
-        # HTML 태그 제거 후 순수 텍스트 확인
-        cleaned_check = re.sub(r"<[^>]+>", "", text_content).strip()
-        # &nbsp;이거나 빈 공간이 아닌 실질적 대사만 허용
-        if cleaned_check and cleaned_check.lower() != "&nbsp;":
+        # HTML 태그 제거 후 순수 텍스트 추출
+        raw_text = re.sub(r"<[^>]+>", "", text_content).strip()
+
+        # 메타데이터 설정부나 빈 공백(&nbsp;)이 아닐 때만 유효 대사로 인정
+        if (
+            raw_text
+            and raw_text.lower() != "&nbsp;"
+            and not any(
+                meta in text_content.lower()
+                for meta in [
+                    "<head>",
+                    "</head>",
+                    "<title>",
+                    "</title>",
+                    "<samiparam>",
+                    "<style",
+                    "font-family",
+                    "margin-left",
+                    ".kokrcc",
+                ]
+            )
+        ):
           pairs.append((current_time, text_content))
+
         current_text_lines = []
 
       if smi_match:
@@ -121,31 +116,14 @@ def parse_subtitles_to_pairs(text):
       elif srt_match:
         current_time = parse_srt_time_to_hms(srt_match.group(1))
     else:
-      # 일반 텍스트 라인 수집 (단, HTML 태그 중 구조 선언부는 제외)
       if stripped:
-        if not (
-            stripped.startswith("<")
-            and stripped.endswith(">")
-            and not "<p" in stripped_lower
-            and not "<br" in stripped_lower
-        ):
-          # CSS 스타일 코드가 포함된 줄 필터링
-          if not any(
-              css_kw in stripped_lower
-              for css_kw in [
-                  "font-weight",
-                  "background-color",
-                  "text-align",
-                  "samitype",
-              ]
-          ):
-            current_text_lines.append(line)
+        current_text_lines.append(line)
 
   # 마지막 남은 블록 처리
   if current_text_lines:
     text_content = " ".join(current_text_lines).strip()
-    cleaned_check = re.sub(r"<[^>]+>", "", text_content).strip()
-    if cleaned_check and cleaned_check.lower() != "&nbsp;":
+    raw_text = re.sub(r"<[^>]+>", "", text_content).strip()
+    if raw_text and raw_text.lower() != "&nbsp;":
       pairs.append((current_time, text_content))
 
   return pairs
@@ -154,7 +132,7 @@ def parse_subtitles_to_pairs(text):
 # --- 4. 웹앱 UI 구성 ---
 st.title("📝 AI 전문 자막 교정기 (싱크 밀림 방지 정밀 버전)")
 st.markdown("""
-자막 파일의 **순수 대사 영역만 안정적으로 파싱**하여 누락 없이 교정합니다.
+자막 파일의 **실제 대사만 정확하게 타겟팅**하여 누락 없이 교정합니다.
 """)
 
 with st.sidebar:
@@ -202,7 +180,6 @@ if uploaded_file is not None:
     st.session_state.accumulated_result = ""
     st.session_state.raw_table_data = []
 
-    # 안정화된 파싱 함수 호출
     pairs = parse_subtitles_to_pairs(file_content)
 
     if not pairs:
@@ -242,7 +219,7 @@ if uploaded_file is not None:
 
 [매우 엄격한 지침]
 1. 위 데이터의 각 행에 적힌 [타임코드]를 결과 표의 첫 번째 칸에 그대로 사용하세요. 절대 타임코드를 바꾸거나 밀리게 해서는 안 됩니다.
-2. 메타데이터나 설정 값이 아닌 실제 대사들만 대상으로 오탈자와 띄어쓰기를 검수하세요.
+2. 실제 대사들만 대상으로 오탈자와 띄어쓰기를 검수하세요.
 3. 입력된 순서와 개수를 100% 동일하게 유지하여 마크다운 표 행(| 타임코드 | 원본 | 수정 제안 | 사유 |)으로만 작성하세요.
 4. 테이블 헤더(|타임코드|원본|수정 제안|사유|)는 출력하지 말고, 오직 내용에 해당하는 행(|...|)들만 작성하세요.
 """
