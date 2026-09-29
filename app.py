@@ -3,7 +3,9 @@ import streamlit as st
 
 # --- 1. 페이지 기본 설정 ---
 st.set_page_config(
-    page_title="AI 자막 교정기 (연속 누적 버전)", page_icon="📝", layout="wide"
+    page_title="AI 자막 교정기 (싱크 밀림 방지 정밀 버전)",
+    page_icon="📝",
+    layout="wide",
 )
 
 # ==========================================
@@ -27,55 +29,55 @@ client = get_openai_client()
 MODEL_ID = "gpt-4o-mini"
 
 SYSTEM_INSTRUCTION = """
-당신은 최고 수준의 전문 자막 교정자입니다. 업로드된 파일의 텍스트를 분석하여 오탈자, 띄어쓰기, 문맥 오류를 철저히 검수해 주세요.
+당신은 완벽한 타임코드 싱크 매칭을 보장하는 전문 자막 교정자입니다. 
+업로드된 자막의 타임라인과 텍스트를 분석하여 오탈자, 띄어쓰기, 문맥 오류를 검수합니다.
 
-아래의 [검수 및 중요 자막 정책]을 엄격히 준수하여 작업을 수행해야 합니다.
-
-[검수 및 중요 자막 정책]
-1. 결과물 출력 형식: 반드시 [타임코드(시:분:초) | 원본 | 수정 제안 | 사유] 순서의 마크다운 표 형식으로만 작성해 주세요. 불필요한 서론이나 맺음말은 절대 작성하지 마세요.
-2. 타임코드 순서 유지 (매우 중요): 입력된 자막의 시간 순서(과거 -> 미래)를 완벽하게 유지하여 위에서부터 아래로 순차적으로 출력해야 합니다. 타임코드가 '0:00:00' 등으로 초기화되거나 뒤죽박죽이 되면 안 됩니다.
-3. 실제 등장하는 대사 보존: 원본 자막에 동일한 대사가 실제로 반복해서 등장한다면, 검수 결과에서도 누락하지 말고 각각의 타임코드에 맞춰 모두 표출해 주세요.
-4. 타임코드 표기 (시:분:초): SMI/SRT 파일의 타임코드(밀리초 등)를 그대로 노출하지 말고, 반드시 "시:분:초" (예: 01:12:30 또는 00:05:15) 형식으로 변환하여 표의 타임코드 열에 기재해 주세요.
-5. <br> 태그 예외 처리: 자막 내에 포함된 `<br>` 코드는 줄바꿈을 의미하는 정상적인 코드입니다. 이를 오류로 잡거나 임의로 삭제하지 말고 그대로 유지한 상태에서 텍스트만 교정하세요.
-6. 표현의 보존: 구어체나 사투리는 상황 및 영상의 문맥에 맞게 최대한 보존하며, 명백한 맞춤법 및 문맥 오류만 교정하세요.
-7. 마침표(.) 사용 금지 (매우 중요): 문장 끝에는 절대 마침표(.)를 찍지 말고, 원본에 마침표가 없다고 해서 이를 오류로 잡지도 마세요. (단, 문맥에 따라 물음표(?)나 느낌표(!)는 허용됩니다.)
+[핵심 검수 원칙 (매우 중요)]
+1. 타임코드 절대 변경 금지: 입력된 각 행의 타임코드(시:분:초)는 임의로 수정, 이동, 생성할 수 없습니다. 원본의 타임코드를 그대로 유지하세요.
+2. 1:1 대응 유지: 입력된 자막의 개수와 순서 그대로 결과가 나와야 하며, 임의로 문장을 합치거나 누락해서는 안 됩니다.
+3. 결과물 형식: 반드시 [타임코드 | 원본 | 수정 제안 | 사유] 형식의 마크다운 표로만 출력하세요. (불필요한 인사말이나 서론 금지)
+4. <br> 태그 및 특수문자 유지: 줄바꿈용 `<br>` 태그는 삭제하지 말고 그대로 두세요.
+5. 마침표(.) 금지: 문장 끝에 마침표를 찍지 마세요 (물음표, 느낌표는 허용).
 """
 
 
-def split_subtitles_naturally(text, block_size=70):
-  """자막의 시간 흐름이 깨지지 않도록 자연스럽게 블록 단위로 분할합니다."""
+def split_subtitles_by_cue(text):
+  """자막 파일(.smi, .srt, .txt)을 싱크 단위(Cues)로 정확하게 파싱하여 분할합니다."""
   lines = text.split("\n")
-  blocks = []
-  current_block = []
+  cues = []
+  current_cue = []
 
   for line in lines:
+    stripped = line.strip()
+    # 새로운 자막 블록의 시작점 감지 (<SYNC>, SRT 숫자 번호 등)
     if (
-        line.strip().upper().startswith("<SYNC")
-        or line.strip().isdigit()
-        or line.strip() == ""
+        stripped.upper().startswith("<SYNC")
+        or "-->" in stripped
+        or (stripped.isdigit() and len(current_cue) > 2)
     ):
-      if current_block:
-        blocks.append("\n".join(current_block))
-        current_block = []
-    current_block.append(line)
+      if current_cue:
+        cues.append("\n".join(current_cue))
+        current_cue = []
+    current_cue.append(line)
 
-  if current_block:
-    blocks.append("\n".join(current_block))
+  if current_cue:
+    cues.append("\n".join(current_cue))
 
-  cleaned_blocks = [b for b in blocks if b.strip()]
-
+  # 30개 단위로 묶어서 청크 구성 (싱크 밀림을 방지하기 위해 적정 크기 유지)
+  chunk_size = 30
+  cleaned_cues = [c for c in cues if c.strip()]
   chunks = []
-  for i in range(0, len(cleaned_blocks), block_size):
-    chunk_blocks = cleaned_blocks[i : i + block_size]
-    chunks.append("\n".join(chunk_blocks))
+
+  for i in range(0, len(cleaned_cues), chunk_size):
+    chunks.append("\n".join(cleaned_cues[i : i + chunk_size]))
 
   return chunks
 
 
 # --- 4. 웹앱 UI 구성 ---
-st.title("📝 AI 전문 자막 교정기 (연속 누적 버전)")
+st.title("📝 AI 전문 자막 교정기 (싱크 밀림 방지 정밀 버전)")
 st.markdown("""
-긴 자막을 파트별로 나누어 처리하되, **이전 검수 결과는 그대로 유지한 채 타임코드 순서대로 아래에 계속 이어서** 출력하는 솔루션입니다.
+자막의 개별 싱크 단위를 엄격하게 고정하여 **타임라인 밀림이나 누락 없이 정확하게 1:1 교정**을 수행합니다.
 """)
 
 with st.sidebar:
@@ -84,8 +86,8 @@ with st.sidebar:
     **1. 파일 업로드**
     지원되는 형식(.smi, .srt, .txt)의 자막 파일을 업로드하세요.
     
-    **2. 검수 시작**
-    모든 대사가 누락 없이 시간 순서대로 안전하게 누적 출력됩니다.
+    **2. 정밀 검수 시작**
+    타임라인 싱크가 완벽히 보존된 교정 결과 마크다운 표가 실시간으로 출력됩니다.
     """)
 
 # --- 5. 세션 상태 초기화 ---
@@ -119,13 +121,15 @@ if uploaded_file is not None:
   with st.expander("원본 자막 내용 미리보기"):
     st.text(
         file_content[:1000]
-        + ("\n\n...(이하 생략)" if len(file_content) > 1000 else "")
+        + ("\n\n...(이후 생략)" if len(file_content) > 1000 else "")
     )
 
-  # --- 7. 대용량 교정 실행 로직 ---
-  if st.button("🚀 AI 자막 검수 시작", type="primary", use_container_width=True):
+  # --- 7. 교정 실행 로직 ---
+  if st.button("🚀 정밀 자막 검수 시작", type="primary", use_container_width=True):
     st.session_state.accumulated_result = ""
-    chunks = split_subtitles_naturally(file_content, block_size=70)
+
+    # 싱크 단위별로 안전하게 쪼개기
+    chunks = split_subtitles_by_cue(file_content)
 
     st.divider()
     st.subheader("📊 전체 검수 및 교정 결과")
@@ -133,28 +137,23 @@ if uploaded_file is not None:
     result_placeholder = st.empty()
 
     try:
+      all_markdown_chunks = []
+      header_markdown = (
+          "| 타임코드 | 원본 | 수정 제안 | 사유 |\n|:---:|:---:|:---:|:---:|\n"
+      )
+
       for i, chunk in enumerate(chunks):
         st.toast(
-            f"🔄 자막 검수 진행 중... (파트 {i+1} / 총 {len(chunks)} 파트)"
+            f"🔄 정밀 검수 진행 중... (파트 {i+1} / 총 {len(chunks)} 파트)"
         )
 
-        if i == 0:
-          prompt = f"""--- 자막 내용 (파트 {i+1}/{len(chunks)}) ---
+        prompt = f"""--- 자막 데이터 조각 (파트 {i+1}/{len(chunks)}) ---
 {chunk}
 
-[중요 지침]
-1. 위 자막의 타임코드와 대사를 시간 순서(과거 -> 미래)대로 정확히 분석하여 표를 만드세요.
-2. 원본 대사가 실제로 반복된다면 누락하지 말고 모두 표출하세요.
-3. 반드시 마크다운 표 형식(첫 줄 표 헤더 포함)으로 출력하세요.
-"""
-        else:
-          prompt = f"""--- 자막 내용 (파트 {i+1}/{len(chunks)}) ---
-{chunk}
-
-[중요 지침]
-1. 이 자막은 이전 파트의 시간대 바로 뒤에 이어지는 다음 시간대의 자막입니다.
-2. **표의 헤더(|타임코드|원본|...|)는 절대 다시 작성하지 말고**, 이전 표 내용에 바로 이어지도록 새로운 데이터 행들만 연속해서 작성하세요.
-3. 타임코드와 대사 흐름이 시간순으로 자연스럽게 이어지도록 하세요.
+[엄격한 지침]
+1. 제공된 자막 조각의 타임코드를 **절대 변경하거나 임의로 재조합하지 말고 그대로 사용**하세요.
+2. 테이블 헤더(|타임코드|원본|수정 제안|사유|)는 출력하지 말고, 오직 내용에 해당하는 행(|...|)들만 작성하세요.
+3. 입력된 순서와 개수를 정확히 유지하여 싱크가 어긋나지 않도록 하세요.
 """
 
         response_stream = client.chat.completions.create(
@@ -164,7 +163,7 @@ if uploaded_file is not None:
                 {"role": "user", "content": prompt},
             ],
             temperature=0.0,
-            max_tokens=16000,
+            max_tokens=4000,
             stream=True,
         )
 
@@ -173,21 +172,25 @@ if uploaded_file is not None:
           content = chunk_resp.choices[0].delta.content
           if content is not None:
             chunk_accumulated += content
-            # 이전 결과물 뒤에 현재 청크의 스트리밍 내용을 실시간으로 붙여서 표시
-            result_placeholder.markdown(
-                st.session_state.accumulated_result + chunk_accumulated
+            temp_full = (
+                header_markdown
+                + "".join(all_markdown_chunks)
+                + chunk_accumulated
             )
+            result_placeholder.markdown(temp_full)
 
-        # 한 파트가 완전히 끝나면 전체 누적 변수에 확정 저장
-        st.session_state.accumulated_result += chunk_accumulated + "\n"
+        all_markdown_chunks.append(chunk_accumulated + "\n")
+        st.session_state.accumulated_result = (
+            header_markdown + "".join(all_markdown_chunks)
+        )
         result_placeholder.markdown(st.session_state.accumulated_result)
 
-      st.toast("✅ 전체 자막 검수가 완벽하게 완료되었습니다!", icon="🎉")
+      st.toast("✅ 정밀 자막 검수가 완벽하게 완료되었습니다!", icon="🎉")
 
     except Exception as e:
       st.error(f"❌ API 호출 중 오류가 발생했습니다: {e}")
 
-  # 검수 결과가 남아있을 경우 화면에 계속 유지
+  # 결과 유지
   elif st.session_state.accumulated_result:
     st.divider()
     st.subheader("📊 전체 검수 및 교정 결과")
