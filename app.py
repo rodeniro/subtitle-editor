@@ -1,4 +1,5 @@
 from openai import OpenAI
+import re
 import streamlit as st
 
 # --- 1. 페이지 기본 설정 ---
@@ -33,12 +34,30 @@ SYSTEM_INSTRUCTION = """
 업로드된 자막의 타임라인과 텍스트를 분석하여 오탈자, 띄어쓰기, 문맥 오류를 검수합니다.
 
 [핵심 검수 원칙 (매우 중요)]
-1. 타임코드 절대 변경 금지: 입력된 각 행의 타임코드(시:분:초)는 임의로 수정, 이동, 생성할 수 없습니다. 원본의 타임코드를 그대로 유지하세요.
-2. 1:1 대응 유지: 입력된 자막의 개수와 순서 그대로 결과가 나와야 하며, 임의로 문장을 합치거나 누락해서는 안 됩니다.
-3. 결과물 형식: 반드시 [타임코드 | 원본 | 수정 제안 | 사유] 형식의 마크다운 표로만 출력하세요. (불필요한 인사말이나 서론 금지)
-4. <br> 태그 및 특수문자 유지: 줄바꿈용 `<br>` 태그는 삭제하지 말고 그대로 두세요.
-5. 마침표(.) 금지: 문장 끝에 마침표를 찍지 마세요 (물음표, 느낌표는 허용).
+1. 대사 없는 행 제외: 텍스트(대사) 내용이 아예 없거나 공백, 혹은 단순 태그(`&nbsp;` 등)만 있어서 실제 발화 대사가 없는 행은 **출력에서 제외(스킵)**하세요. 오직 실제 대사가 존재하는 행만 처리해야 합니다.
+2. 타임코드 형식 준수: 검출된 행의 타임코드는 보기 쉬운 시:분:초(HH:MM:SS) 형식으로 첫 번째 열에 작성하세요.
+3. 1:1 대응 유지: 대사가 있는 행들에 대해서는 입력된 순서와 개수를 정확히 유지하여 싱크가 어긋나지 않도록 하세요.
+4. 결과물 형식: 반드시 [타임코드 | 원본 | 수정 제안 | 사유] 형식의 마크다운 표로만 출력하세요.
+5. <br> 태그 및 특수문자 유지: 줄바꿈용 `<br>` 태그는 삭제하지 말고 그대로 두세요.
+6. 마침표(.) 금지: 문장 끝에 마침표를 찍지 마세요 (물음표, 느낌표는 허용).
 """
+
+
+def format_milliseconds_to_hms(ms):
+  """밀리초(ms)를 시:분:초 형태로 변환합니다."""
+  total_seconds = int(ms) // 1000
+  hours = total_seconds // 3600
+  minutes = (total_seconds % 3600) // 60
+  seconds = total_seconds % 60
+  return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def parse_srt_time_to_hms(srt_time_str):
+  """SRT 타임코드(00:00:00,000)를 시:분:초 형태로 변환합니다."""
+  match = re.match(r"(\d{2}:\d{2}:\d{2})", srt_time_str)
+  if match:
+    return match.group(1)
+  return srt_time_str
 
 
 def split_subtitles_by_cue(text):
@@ -49,7 +68,6 @@ def split_subtitles_by_cue(text):
 
   for line in lines:
     stripped = line.strip()
-    # 새로운 자막 블록의 시작점 감지 (<SYNC>, SRT 숫자 번호 등)
     if (
         stripped.upper().startswith("<SYNC")
         or "-->" in stripped
@@ -63,7 +81,6 @@ def split_subtitles_by_cue(text):
   if current_cue:
     cues.append("\n".join(current_cue))
 
-  # 30개 단위로 묶어서 청크 구성 (싱크 밀림을 방지하기 위해 적정 크기 유지)
   chunk_size = 30
   cleaned_cues = [c for c in cues if c.strip()]
   chunks = []
@@ -77,7 +94,7 @@ def split_subtitles_by_cue(text):
 # --- 4. 웹앱 UI 구성 ---
 st.title("📝 AI 전문 자막 교정기 (싱크 밀림 방지 정밀 버전)")
 st.markdown("""
-자막의 개별 싱크 단위를 엄격하게 고정하여 **타임라인 밀림이나 누락 없이 정확하게 1:1 교정**을 수행합니다.
+자막의 개별 싱크 단위를 엄격하게 고정하여 **대사가 없는 빈 행은 깔끔하게 제외하고 정확하게 교정**합니다.
 """)
 
 with st.sidebar:
@@ -87,7 +104,7 @@ with st.sidebar:
     지원되는 형식(.smi, .srt, .txt)의 자막 파일을 업로드하세요.
     
     **2. 정밀 검수 시작**
-    타임라인 싱크가 완벽히 보존된 교정 결과 마크다운 표가 실시간으로 출력됩니다.
+    대사가 존재하는 행들만 추출되어 `시:분:초` 표 형태로 실시간 출력됩니다.
     """)
 
 # --- 5. 세션 상태 초기화 ---
@@ -128,7 +145,6 @@ if uploaded_file is not None:
   if st.button("🚀 정밀 자막 검수 시작", type="primary", use_container_width=True):
     st.session_state.accumulated_result = ""
 
-    # 싱크 단위별로 안전하게 쪼개기
     chunks = split_subtitles_by_cue(file_content)
 
     st.divider()
@@ -151,9 +167,9 @@ if uploaded_file is not None:
 {chunk}
 
 [엄격한 지침]
-1. 제공된 자막 조각의 타임코드를 **절대 변경하거나 임의로 재조합하지 말고 그대로 사용**하세요.
-2. 테이블 헤더(|타임코드|원본|수정 제안|사유|)는 출력하지 말고, 오직 내용에 해당하는 행(|...|)들만 작성하세요.
-3. 입력된 순서와 개수를 정확히 유지하여 싱크가 어긋나지 않도록 하세요.
+1. 텍스트(대사)가 아예 없거나 공백, 혹은 무의미한 태그만 있는 행은 **절대 출력하지 말고 제외**하세요. 오직 실제 대사가 있는 행만 표의 행으로 작성하세요.
+2. 각 자막 블록의 타임코드를 추출하여 첫 번째 열인 '타임코드' 칸에 보기 쉬운 **시:분:초(HH:MM:SS)** 형식으로 작성하세요.
+3. 테이블 헤더(|타임코드|원본|수정 제안|사유|)는 출력하지 말고, 오직 내용에 해당하는 행(|...|)들만 작성하세요.
 """
 
         response_stream = client.chat.completions.create(
@@ -173,13 +189,13 @@ if uploaded_file is not None:
           if content is not None:
             chunk_accumulated += content
             temp_full = (
-                header_markdown
-                + "".join(all_markdown_chunks)
-                + chunk_accumulated
+                header_markdown + "".join(all_markdown_chunks) + chunk_accumulated
             )
             result_placeholder.markdown(temp_full)
 
-        all_markdown_chunks.append(chunk_accumulated + "\n")
+        if chunk_accumulated.strip():
+          all_markdown_chunks.append(chunk_accumulated.strip() + "\n")
+
         st.session_state.accumulated_result = (
             header_markdown + "".join(all_markdown_chunks)
         )
