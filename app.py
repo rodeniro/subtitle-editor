@@ -68,10 +68,25 @@ def parse_subtitles_to_pairs(text):
   pairs = []
   current_time = "00:00:00"
   current_text_lines = []
+  in_body = False  # 기본적으로 <body> 안쪽부터만 대사로 인정하기 위해 False로 시작
 
   for line in lines:
     stripped = line.strip()
     stripped_lower = stripped.lower()
+
+    # 헤더 및 바디 영역 체크
+    if "<body" in stripped_lower:
+      in_body = True
+      continue
+    if "</body>" in stripped_lower:
+      in_body = False
+      continue
+    if "<head>" in stripped_lower or "<style" in stripped_lower:
+      in_body = False
+      continue
+    if "</head>" in stripped_lower or "</style>" in stripped_lower:
+      # 스타일이 끝난 후 바디가 시작되기 전일 수 있으므로 안전하게 유지
+      continue
 
     # 타임코드 감지 (SMI: <SYNC Start=...> 또는 SRT: 00:00:00 --> 00:00:00)
     smi_match = re.search(r"start\s*=\s*(\d+)", stripped, re.IGNORECASE)
@@ -81,42 +96,46 @@ def parse_subtitles_to_pairs(text):
     )
 
     if smi_match or srt_match:
-      # 이전까지 누적된 대사 저장
+      # 바디 영역 내부이거나 <body> 태그를 놓쳤더라도 스타일 태그 안이 아니라면 유효성 검사 후 저장
       if current_text_lines:
         text_content = " ".join(current_text_lines).strip()
-        # HTML 태그 제거 후 순수 텍스트 확인
         raw_text = re.sub(r"<[^>]+>", "", text_content).strip()
 
-        # 유효한 대사만 추가 (특수 태그나 공백, &nbsp; 등 제외)
         if (
             raw_text
             and raw_text.lower() != "&nbsp;"
-            and not raw_text.startswith("<")
+            and not raw_text.startswith("Metrics")
+            and not "{" in raw_text
         ):
           pairs.append((current_time, text_content))
         current_text_lines = []
 
       if smi_match:
-        current_time = format_milliseconds_to_hms(int(smi_match.group(1)))
+        # <body> 이전(헤더/스타일 영역)에 나오는 Start= 숫자는 무시
+        if in_body or "<body" in text.lower() and text.find(
+            "<body"
+        ) < text.find(stripped):
+          current_time = format_milliseconds_to_hms(int(smi_match.group(1)))
+          # <SYNC Start=...> 라인 자체에 대사가 포함되어 있는 경우 추출
+          sync_content_sub = re.sub(
+              r"<sync[^>]*>", "", stripped, flags=re.IGNORECASE
+          ).strip()
+          if sync_content_sub:
+            current_text_lines.append(sync_content_sub)
       elif srt_match:
         current_time = parse_srt_time_to_hms(srt_match.group(1))
     else:
-      # HTML 구조 태그 및 스타일/메타 선언부 원천 차단
+      # 헤더 영역이거나 스타일 관련 구문이면 무조건 스킵
+      if not in_body and ("<body" not in text.lower() or text.lower().find("<body") > text.find(line)):
+        # 만약 파일에 <body> 태그가 명시되어 있지 않은 경우를 대비해 <SYNC>가 나오기 전까지의 라인은 스킵
+        continue
+
       if not stripped:
         continue
       if any(
-          tag in stripped_lower
-          for tag in [
-              "<sami",
-              "</sami>",
-              "<head>",
-              "</head>",
-              "<body",
-              "</body>",
-              "<title>",
-              "</title>",
-              "<style",
-              "</style>",
+          meta in stripped_lower
+          for meta in [
+              "metrics",
               "font-family",
               "margin-left",
               "margin-right",
@@ -124,13 +143,18 @@ def parse_subtitles_to_pairs(text):
               "margin-top",
               ".kokrcc",
               "samitype",
+              "color:",
+              "font-weight",
           ]
       ):
         continue
 
-      # 일반 대사 라인 수집 (단독 <P> 태그 등도 필터링)
       clean_line_check = re.sub(r"<[^>]+>", "", stripped).strip()
-      if clean_line_check and clean_line_check.lower() != "&nbsp;":
+      if (
+          clean_line_check
+          and clean_line_check.lower() != "&nbsp;"
+          and not clean_line_check.startswith("Metrics")
+      ):
         current_text_lines.append(stripped)
 
   # 마지막 남은 블록 처리
@@ -140,7 +164,8 @@ def parse_subtitles_to_pairs(text):
     if (
         raw_text
         and raw_text.lower() != "&nbsp;"
-        and not raw_text.startswith("<")
+        and not raw_text.startswith("Metrics")
+        and not "{" in raw_text
     ):
       pairs.append((current_time, text_content))
 
@@ -299,7 +324,7 @@ if st.session_state.raw_table_data:
       " 활용할 수 있도록 CSV 백데이터로 제공합니다."
   )
 
-  csv_content = "타임코드,원본,수정 제안,S사유\n".replace("S", "")
+  csv_content = "타임코드,원본,수정 제안,사유\n"
   for row in st.session_state.raw_table_data:
     escaped_row = [f'"{col.replace('"', '""')}"' for col in row[:4]]
     csv_content += ",".join(escaped_row) + "\n"
