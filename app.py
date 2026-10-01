@@ -68,26 +68,10 @@ def parse_subtitles_to_pairs(text):
   pairs = []
   current_time = "00:00:00"
   current_text_lines = []
-  in_body = True
 
   for line in lines:
     stripped = line.strip()
     stripped_lower = stripped.lower()
-
-    # HTML 구조상 헤더 영역 체크
-    if "<head>" in stripped_lower or "<style" in stripped_lower:
-      in_body = False
-      continue
-    if "</head>" in stripped_lower or "</style>" in stripped_lower:
-      in_body = True
-      continue
-    if "<body" in stripped_lower:
-      in_body = True
-      continue
-
-    # 헤더 내부의 설정값이면 건너뜀
-    if not in_body:
-      continue
 
     # 타임코드 감지 (SMI: <SYNC Start=...> 또는 SRT: 00:00:00 --> 00:00:00)
     smi_match = re.search(r"start\s*=\s*(\d+)", stripped, re.IGNORECASE)
@@ -100,10 +84,15 @@ def parse_subtitles_to_pairs(text):
       # 이전까지 누적된 대사 저장
       if current_text_lines:
         text_content = " ".join(current_text_lines).strip()
+        # HTML 태그 제거 후 순수 텍스트 확인
         raw_text = re.sub(r"<[^>]+>", "", text_content).strip()
 
-        # 공백이나 &nbsp;가 아닌 실제 유효 대사만 추가
-        if raw_text and raw_text.lower() != "&nbsp;":
+        # 유효한 대사만 추가 (특수 태그나 공백, &nbsp; 등 제외)
+        if (
+            raw_text
+            and raw_text.lower() != "&nbsp;"
+            and not raw_text.startswith("<")
+        ):
           pairs.append((current_time, text_content))
         current_text_lines = []
 
@@ -112,10 +101,22 @@ def parse_subtitles_to_pairs(text):
       elif srt_match:
         current_time = parse_srt_time_to_hms(srt_match.group(1))
     else:
-      # 스타일 선언부나 불필요한 메타 태그가 아닌 일반 텍스트 라인 수집
-      if stripped and not any(
-          meta in stripped_lower
-          for meta in [
+      # HTML 구조 태그 및 스타일/메타 선언부 원천 차단
+      if not stripped:
+        continue
+      if any(
+          tag in stripped_lower
+          for tag in [
+              "<sami",
+              "</sami>",
+              "<head>",
+              "</head>",
+              "<body",
+              "</body>",
+              "<title>",
+              "</title>",
+              "<style",
+              "</style>",
               "font-family",
               "margin-left",
               "margin-right",
@@ -125,13 +126,22 @@ def parse_subtitles_to_pairs(text):
               "samitype",
           ]
       ):
-        current_text_lines.append(line)
+        continue
+
+      # 일반 대사 라인 수집 (단독 <P> 태그 등도 필터링)
+      clean_line_check = re.sub(r"<[^>]+>", "", stripped).strip()
+      if clean_line_check and clean_line_check.lower() != "&nbsp;":
+        current_text_lines.append(stripped)
 
   # 마지막 남은 블록 처리
   if current_text_lines:
     text_content = " ".join(current_text_lines).strip()
     raw_text = re.sub(r"<[^>]+>", "", text_content).strip()
-    if raw_text and raw_text.lower() != "&nbsp;":
+    if (
+        raw_text
+        and raw_text.lower() != "&nbsp;"
+        and not raw_text.startswith("<")
+    ):
       pairs.append((current_time, text_content))
 
   return pairs
@@ -289,7 +299,7 @@ if st.session_state.raw_table_data:
       " 활용할 수 있도록 CSV 백데이터로 제공합니다."
   )
 
-  csv_content = "타임코드,원본,수정 제안,사유\n"
+  csv_content = "타임코드,원본,수정 제안,S사유\n".replace("S", "")
   for row in st.session_state.raw_table_data:
     escaped_row = [f'"{col.replace('"', '""')}"' for col in row[:4]]
     csv_content += ",".join(escaped_row) + "\n"
